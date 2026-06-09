@@ -1,0 +1,111 @@
+name: CI — Test & Security Scan
+
+on:
+  push:
+    branches: ["main", "dev"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  security-events: write   # required for CodeQL / SARIF uploads
+
+jobs:
+  # ── 1. Unit Tests ────────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest with coverage
+        run: pytest app/tests/ --cov=app --cov-report=term-missing --cov-fail-under=80
+
+  # ── 2. SAST — Bandit ─────────────────────────────────────────────────────────
+  sast-bandit:
+    name: SAST — Bandit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Bandit
+        run: pip install bandit==1.8.0
+
+      - name: Run Bandit
+        run: bandit -r app/ -ll -ii --format json -o bandit-report.json
+        continue-on-error: false
+
+      - name: Upload Bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+
+  # ── 3. SAST — CodeQL ─────────────────────────────────────────────────────────
+  sast-codeql:
+    name: SAST — CodeQL
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
+
+  # ── 4. SCA — pip-audit ───────────────────────────────────────────────────────
+  sca-pip-audit:
+    name: SCA — pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: pip install pip-audit==2.7.3
+
+      - name: Audit production dependencies
+        run: pip-audit -r requirements.txt --strict
+
+  # ── 5. Secret Scanning — Gitleaks ────────────────────────────────────────────
+  secret-scan:
+    name: Secret Scan — Gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so Gitleaks scans all commits
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
