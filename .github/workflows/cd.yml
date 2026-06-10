@@ -48,7 +48,7 @@ jobs:
 
       # ── Container Image Scan — Trivy ───────────────────────────────────────
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@v0.36.20
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.build.outputs.image }}
           format: sarif
