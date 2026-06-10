@@ -1,0 +1,6 @@
+# Base image OS CVEs in python:3.12-slim-bookworm
+# These are Debian-level findings outside application control
+CVE-2026-6357
+CVE-2026-3219
+CVE-2025-8869
+CVE-2026-1703
