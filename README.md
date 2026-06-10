@@ -13,7 +13,7 @@ The API exposes two endpoints:
 | `GET` | `/` | Health check — returns status, version, and environment |
 | `POST` | `/echo` | Echoes a submitted message back to the caller |
 
-The application is a controlled surface so that every security tool in the pipeline has something real to analyze, without obscuring the pipeline itself in application complexity.
+The application is a controlled surface so that every security tool in the pipeline has something real to analyze, without obscuring the pipeline in application complexity.
 
 ---
 
@@ -51,7 +51,7 @@ push to main
         └── Push image to ECR  ← only reached if scan is clean
 ```
 
-The deploy step is only reached if the container image scan passes. The SARIF output from Trivy is uploaded to GitHub's Security tab alongside CodeQL results.
+The deploy step is only reached if the container image scan passes. Trivy SARIF results are uploaded to the GitHub Security tab alongside CodeQL findings.
 
 ---
 
@@ -59,33 +59,37 @@ The deploy step is only reached if the container image scan passes. The SARIF ou
 
 ### OIDC for AWS authentication — no stored credentials
 
-The CD workflow uses GitHub's OIDC provider to obtain short-lived AWS credentials at runtime rather than storing an `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in repository secrets. The IAM role is scoped to this specific repository and branch (`repo:thegitfiddler/secure_pipeline:ref:refs/heads/main`), so the credentials cannot be used outside that context even if intercepted.
+The CD workflow authenticates to AWS using GitHub's OIDC provider, exchanging a short-lived identity token for temporary AWS credentials at runtime. No `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` is stored anywhere. The IAM role trust policy is scoped specifically to this repository and branch:
 
-This eliminates the most common CI/CD credential leak vector and follows AWS's recommended pattern for GitHub Actions.
+```
+repo:Thegitfiddler/Secure_Pipeline:ref:refs/heads/main
+```
+
+This means the credentials cannot be used outside that exact context, eliminating the most common CI/CD credential leak vector.
 
 ### Multi-stage Docker build with a non-root runtime user
 
-The Dockerfile uses a two-stage build: a `builder` stage installs dependencies, and a minimal `runtime` stage copies only the installed packages — no pip, no build tools, no unnecessary attack surface. The runtime container runs as a non-root system user (`appuser`), so a container escape does not immediately grant root on the host.
+The Dockerfile uses a two-stage build: a `builder` stage installs dependencies, and a minimal `runtime` stage copies only the installed packages — no pip, no build tools, no unnecessary attack surface. The container runs as a non-root system user (`appuser`), so a container escape does not immediately grant root on the host.
 
 ### Bandit — SAST for Python
 
-Bandit performs static analysis specifically for Python security anti-patterns: hardcoded credentials, use of dangerous functions (`eval`, `subprocess` with shell=True), insecure random number generation, and similar issues. Configured at medium+ severity and confidence to reduce noise while catching real findings. A `.bandit` config file excludes the test directory from scanning.
+Bandit performs static analysis for Python-specific security anti-patterns: hardcoded credentials, dangerous function calls, insecure randomness, and similar issues. Configured at medium+ severity and confidence to reduce noise. A `.bandit` config file scopes the scan to the `app/` directory and excludes tests.
 
 ### CodeQL — semantic SAST
 
-CodeQL goes deeper than pattern matching — it builds a semantic model of the code and traces data flows to find vulnerabilities like injection sinks that Bandit can miss. Results appear in the repository's Security → Code Scanning tab.
+CodeQL builds a semantic model of the codebase and traces data flows to find vulnerabilities that pattern-matching tools can miss — such as user input reaching a dangerous sink. Results are uploaded to the repository's Security → Code Scanning tab.
 
 ### pip-audit — Software Composition Analysis (SCA)
 
-pip-audit queries `requirements.txt` against the OSV (Open Source Vulnerability) database and the Python Packaging Advisory Database. It catches known CVEs in third-party dependencies — a category that SAST tools don't cover. Only production dependencies are audited, matching what actually runs in the container.
+pip-audit checks production dependencies against the OSV and PyPA advisory databases for known CVEs. This covers vulnerabilities in third-party packages that SAST tools don't see. During development, pip-audit flagged active CVEs in a transitive starlette dependency pulled in by an older FastAPI version — the dependency was updated to resolve them before any code was merged.
 
 ### Gitleaks — secret scanning
 
-Gitleaks scans the full commit history (not just the current diff) for accidentally committed secrets: API keys, tokens, connection strings, private keys. The full-history scan (`fetch-depth: 0`) catches historical leaks, not just new ones.
+Gitleaks scans the full commit history for accidentally committed secrets: API keys, tokens, connection strings, and private keys. The full-history scan (`fetch-depth: 0`) catches historical leaks, not just new commits.
 
 ### Trivy — container image scanning
 
-Trivy scans the final Docker image layer-by-layer for known CVEs in OS packages and Python dependencies. It runs against the built image before the push step, so a vulnerable image never reaches the registry. Only `CRITICAL` and `HIGH` findings fail the build; `ignore-unfixed: true` avoids blocking on vulnerabilities that have no patch available yet.
+Trivy scans the final Docker image layer-by-layer for known CVEs in OS packages and Python dependencies. The scan runs before the push step — a vulnerable image never reaches the registry. CRITICAL and HIGH findings block the pipeline. A `.trivyignore` file documents base OS CVEs in the Debian layer that have no upstream fix available yet; these are explicitly acknowledged rather than silently ignored.
 
 ---
 
@@ -95,19 +99,7 @@ Trivy scans the final Docker image layer-by-layer for known CVEs in OS packages 
 |--------|---------|
 | `AWS_ROLE_ARN` | ARN of the IAM role to assume via OIDC |
 
-No AWS access keys are stored. The IAM role's trust policy is scoped to this repository:
-
-```json
-{
-  "Condition": {
-    "StringLike": {
-      "token.actions.githubusercontent.com:sub": "repo:thegitfiddler/secure_pipeline:ref:refs/heads/main"
-    }
-  }
-}
-```
-
-The role requires `AmazonEC2ContainerRegistryPowerUser` permissions on the target ECR repository.
+No AWS access keys are stored. The role requires `AmazonEC2ContainerRegistryPowerUser` permissions and a trust policy scoped to this repository.
 
 ---
 
@@ -119,6 +111,8 @@ pip install -r requirements.txt -r requirements-dev.txt
 
 # Run the API
 uvicorn app.main:app --reload
+
+# API docs available at http://localhost:8000/docs
 
 # Run tests
 pytest app/tests/ --cov=app --cov-report=term-missing
@@ -132,9 +126,8 @@ pip-audit -r requirements.txt
 # Build and run the container
 docker build -t secure_pipeline .
 docker run -p 8000:8000 secure_pipeline
-```
 
-API docs are available at `http://localhost:8000/docs` when running locally.
+```
 
 ---
 
@@ -147,11 +140,14 @@ API docs are available at `http://localhost:8000/docs` when running locally.
 │       ├── ci.yml          # Test + security scans
 │       └── cd.yml          # Build + container scan + ECR push
 ├── app/
+│   ├── __init__.py
 │   ├── main.py             # FastAPI application
 │   └── tests/
+│       ├── __init__.py
 │       └── test_main.py    # Unit tests
-├── .bandit                 # Bandit configuration
+├── .bandit                 # Bandit scan configuration
 ├── .gitignore
+├── .trivyignore            # Documented base OS CVE exceptions
 ├── Dockerfile              # Multi-stage, non-root runtime
 ├── requirements.txt        # Production dependencies
 ├── requirements-dev.txt    # Test and security tooling
